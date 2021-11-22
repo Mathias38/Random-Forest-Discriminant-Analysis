@@ -24,13 +24,13 @@ class RandomForestDA(object):
     :param  max_depth:      Maximum depth of the trees
     :param cumulative_vip_treshold:     This treshold will determine where to split the operation dataframe and how much operation will be selected 
     (0.50 : select operation(s) that explain 50% of variance in current model)
-    :param accuracy_percent:    percentage accuracy of first model a model needs to be validated
+    :param bad_accuracy_percent:    percentage bad accuracy of first model a model needs to be validated
     """
-    def __init__(self, nb_trees = 100, depth=4, cumulative_vip_treshold = 0.5, accuracy_percent = 0.9, max_features = "auto", vip_agregate_method = "sum"):
+    def __init__(self, nb_trees = 100, depth=4, cumulative_vip_treshold = 0.5, bad_accuracy_percent = 0.9, max_features = "auto", vip_agregate_method = "sum"):
         self.nb_trees = nb_trees
         self.depth = depth
         self.cumulative_vip_treshold = cumulative_vip_treshold
-        self.accuracy_percent = accuracy_percent
+        self.bad_accuracy_percent = bad_accuracy_percent
         self.max_features = max_features
         self.vip_agregate_method = vip_agregate_method
     
@@ -103,18 +103,20 @@ class RandomForestDA(object):
             print("ERROR: "+ self.vip_agregate_method+" is not a supported agregation method")
         
         cols = vip_col['COLUMN']
+        last_ok_bad_acc_cols = vip_col['COLUMN']
         treshold = self.cumulative_vip_treshold
-        min_bad_acc = self.bad_accuracy(y , preds) * self.accuracy_percent
+        min_bad_acc = self.bad_accuracy(y , preds) * self.bad_accuracy_percent
         
         #This loop will make model with all variables and then drop a part of the operations depending on cumulative vip (explained variance)
         #The loop stops when the bad accuracy treshold is reached or when there is only one operation left
         #Variables are divided between context for each operation (can be equipment / chamber / recipe)
-        while (self.bad_accuracy(y, preds) >= min_bad_acc) and (len(cols) > 1) :
+        while len(cols) > 1:
                         
             vip_col_sorted = vip_col.sort_values(by=['VIP_SUM'], ascending = False).reset_index()
             vip_col_sorted = vip_col_sorted.drop(['index'], axis = 1)
             vip_col_sorted['CUMUL_VIP_SUM'] =  vip_col_sorted['VIP_SUM'].cumsum()
             
+            #Discard columns that are under the cumulated variable importance under treshold
             for i in range(0,len(vip_col_sorted)):
                 
                 if vip_col_sorted.iloc[i]['CUMUL_VIP_SUM'] > treshold:
@@ -125,9 +127,25 @@ class RandomForestDA(object):
             old_cols = copy.copy(cols)
             cols = vip_col_sorted['COLUMN']
             
-            if len(old_cols) <= len(cols):
-                treshold = treshold - 0.05     
+            #If no columns are discarded reduce the treshold (you can change the 0.05 step to descend faster or slower)
+            while len(old_cols) <= len(cols):
+                treshold = treshold - 0.05
+                print("treshold")
+                print(treshold)
+                print("old_cols")
+                print(old_cols)
+                print("cols")
+                print(cols)
+                for i in range(0,len(vip_col_sorted)):
                 
+                    if vip_col_sorted.iloc[i]['CUMUL_VIP_SUM'] > treshold:
+                        idx = i
+                        break   
+                    
+                vip_col_sorted = vip_col_sorted[:(idx + 1)]
+                old_cols = copy.copy(cols)
+                cols = vip_col_sorted['COLUMN']
+                    
             new_data = pd.get_dummies(data_x[cols], prefix_sep = ";")
                
             #Drop missing columns
@@ -135,8 +153,7 @@ class RandomForestDA(object):
                 split = col.split(";")
                 if split[1] == "MISSING":
                     new_data = new_data.drop([col], axis = 1) 
-               
-    
+                  
             rf = self.make_forest(new_data, y)
             preds = rf.predict(new_data)
             preds = list(preds)
@@ -157,36 +174,44 @@ class RandomForestDA(object):
             self.print_model_metrics(y, preds)
             print("\n")
                        
-            if self.bad_accuracy(y, preds) < min_bad_acc:
-                new_data = pd.get_dummies(data_x[old_cols], prefix_sep = ";")
-                                   
-                #Drop missing machines
-                for col in list(new_data.columns):
-                    
-                    split = col.split(";")
-                    if split[1] == "MISSING":
-                        new_data = new_data.drop([col], axis = 1)
-                                   
-                rf = self.make_forest(new_data, y)
-                preds = rf.predict(new_data)
-                preds = list(preds)
-                vip = self.get_vip(rf, new_data)
-                            
-                if self.vip_agregate_method == "sum":
+            #Save the last columns for which model bad accuracy is greater than minimum bad accuracy
+            if self.bad_accuracy(y, preds) >= min_bad_acc:
+                last_ok_bad_acc_cols = copy.copy(cols) 
+                              
+            print("min bad accuracy")
+            print(min_bad_acc)
+            
+        #If the 1 column model has a bad accuracy under minimum bad accuracy go back to the last ok model
+        if self.bad_accuracy(y, preds) < min_bad_acc:
+            new_data = pd.get_dummies(data_x[last_ok_bad_acc_cols], prefix_sep = ";")
+                               
+            #Drop missing machines
+            for col in list(new_data.columns):
                 
-                    vip_col = self.get_vip_by_column_sum(vip)
+                split = col.split(";")
+                if split[1] == "MISSING":
+                    new_data = new_data.drop([col], axis = 1)
+                               
+            rf = self.make_forest(new_data, y)
+            preds = rf.predict(new_data)
+            preds = list(preds)
+            vip = self.get_vip(rf, new_data)
+                        
+            if self.vip_agregate_method == "sum":
+            
+                vip_col = self.get_vip_by_column_sum(vip)
+            
+            elif self.vip_agregate_method == "mean":
+            
+                vip_col = self.get_vip_by_column_mean(vip)
+            
+            elif self.elf.vip_agregate_method == "max":
+            
+                vip_col = self.get_vip_by_column_max(vip)
                 
-                elif self.vip_agregate_method == "mean":
-                
-                    vip_col = self.get_vip_by_column_mean(vip)
-                
-                elif self.elf.vip_agregate_method == "max":
-                
-                    vip_col = self.get_vip_by_column_max(vip)
-                    
-                self.print_model_metrics(y, preds)        
-                print("min bad accuracy")
-                print(min_bad_acc)
+            self.print_model_metrics(y, preds)        
+            print("min bad accuracy")
+            print(min_bad_acc)
     
     """
     Creates a dataframe sumarizing the random forest in a comprehensible way
@@ -435,5 +460,3 @@ class RandomForestDA(object):
   
 
     
-
-'''-----------------------------------------------------------------------------------------------------------------'''
